@@ -1,0 +1,24 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "cppdbg",
+      "request": "launch",
+      "args": [],
+      "stopAtEntry": false,
+      "externalConsole": true,
+      "cwd": "c:/Users/ANGELICA/Desktop/ANGELICA/UNICAL/MAGISTRALE/II ANNO/PRIMO SEMESTRE/HIGH PERFORMANCE COMPUTING/PROGETTO/CODICE/MonteCarloPerRadioterapia",
+      "program": "c:/Users/ANGELICA/Desktop/ANGELICA/UNICAL/MAGISTRALE/II ANNO/PRIMO SEMESTRE/HIGH PERFORMANCE COMPUTING/PROGETTO/CODICE/MonteCarloPerRadioterapia/build/Debug/outDebug",
+      "MIMode": "gdb",
+      "miDebuggerPath": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    }
+  ]
+}
