@@ -5,6 +5,9 @@
 #include <chrono>
 #include <cstring>
 #include <vector>
+#include <thread>
+#include <atomic>
+#include <mutex>
 
 #include "physics.h"
 #include "compton.h"
@@ -12,18 +15,15 @@
 #include "phantom.h"
 #include "output.h"
 
-// stato di una particella sullo stack
 struct Fotone {
-    double x, y, z;    // posizione [cm]
-    double ux, uy, uz; // versore direzione (normalizzato)
-    double energia;     // energia [MeV]
+    double x, y, z;
+    double ux, uy, uz;
+    double energia;
 };
 
-// CAMPIONAMENTO SORGENTE
 inline Fotone genera_fotone_iniziale(const Spettro &spettro, Xoshiro256 &rng) {
     double cx = PHANTOM_CM / 2.0;
     double cy = PHANTOM_CM / 2.0;
-
     Fotone p;
     p.x = cx + (rng() * 2.0 - 1.0) * SEMI_AMPIEZZA_CAMPO;
     p.y = cy + (rng() * 2.0 - 1.0) * SEMI_AMPIEZZA_CAMPO;
@@ -35,7 +35,6 @@ inline Fotone genera_fotone_iniziale(const Spettro &spettro, Xoshiro256 &rng) {
     return p;
 }
 
-// DISTANZA AL PROSSIMO CONFINE DI VOXEL
 inline double distanza_limite_voxel(double x, double y, double z, double ux, double uy, double uz, int ix, int iy, int iz) {
     double distanza_minima_confine = 1.0e30; // inizializzata a infinito
     if (std::fabs(ux) > 1.0e-12) {
@@ -77,7 +76,6 @@ inline double distanza_limite_voxel(double x, double y, double z, double ux, dou
     return distanza_minima_confine;
 }
 
-// TRASPORTO FOTONE CICLO COMPLETO
 void trasporto_fotoni(Fotone fotone_iniziale, const int *phantom, double *dose, Xoshiro256 &rng) {
 
     Fotone stack[64];
@@ -197,36 +195,89 @@ void trasporto_fotoni(Fotone fotone_iniziale, const int *phantom, double *dose, 
     }
 }
 
+struct ConfigurazioneWorker {
+    int id_thread;
+    int numero_thread;
+    long long numero_fotoni;
+    uint64_t seed_casuale;
+    const int* phantom;
+    double* dose_globale;
+    std::atomic<long long>& contatore_progresso;
+    std::chrono::time_point<std::chrono::high_resolution_clock>& istante_inizio;
+};
+
+void worker(const ConfigurazioneWorker& cfg) {
+    uint64_t seed_thread = cfg.seed_casuale + (uint64_t)cfg.id_thread * 2654435761ULL;
+    Xoshiro256 generatore(seed_thread);
+
+    Spettro spettro;
+    std::vector<double> dose_locale(NX * NY * NZ, 0.0);
+
+    for (long long i = cfg.id_thread; i < cfg.numero_fotoni; i += cfg.numero_thread) {
+        Fotone fotone = genera_fotone_iniziale(spettro, generatore);
+        trasporto_fotoni(fotone, cfg.phantom, dose_locale.data(), generatore);
+
+        if (cfg.id_thread == 0) {
+            long long fotoni_completati = cfg.contatore_progresso.fetch_add(
+                cfg.numero_thread, std::memory_order_relaxed) + cfg.numero_thread;
+
+            long long intervallo_stampa = std::max(1LL, cfg.numero_fotoni / 20);
+            bool stampa_si  = (fotoni_completati % intervallo_stampa) < cfg.numero_thread;
+
+            if (stampa_si) {
+                auto ora = std::chrono::high_resolution_clock::now();
+                double secondi_trascorsi = std::chrono::duration<double>(ora - cfg.istante_inizio).count();
+                double fotoni_al_secondo = fotoni_completati / secondi_trascorsi;
+                double secondi_rimanenti = (cfg.numero_fotoni - fotoni_completati) / fotoni_al_secondo;
+
+                printf(" [%5.1f%%]  %.0f fotoni/s  ETA %.0fs\n", 100.0 * fotoni_completati / cfg.numero_fotoni, fotoni_al_secondo, secondi_rimanenti);
+            }
+        }
+    }
+
+    static std::mutex mutex_riduzione;
+    {
+        std::lock_guard<std::mutex> lock(mutex_riduzione);
+        for (int k = 0; k < NX * NY * NZ; k++)
+            cfg.dose_globale[k] += dose_locale[k];
+    }
+}
+
 int main(int argc, char *argv[]) {
 
     long long num_fotoni = 1000000;
     int tipo_phantom = 0;
-    uint64_t seed   = 42ULL;
+    uint64_t seed = 42ULL;
+    int num_thread = (int)std::thread::hardware_concurrency();
+    if (num_thread < 1)
+        num_thread = 1;
 
     if (argc > 1) num_fotoni = std::atoll(argv[1]);
     if (argc > 2) tipo_phantom = std::atoi(argv[2]);
     if (argc > 3) seed = (uint64_t)std::atoll(argv[3]);
+    if (argc > 4) num_thread = std::atoi(argv[4]);
 
     const char *phantom_label;
     if (tipo_phantom == 0){
-      phantom_label = "Acqua omogenea";
+        phantom_label = "Acqua omogenea";
     } else{
-      phantom_label = "Acqua + Osso";
+        phantom_label = "Acqua + Osso";
     }
 
-    printf("  Monte Carlo per Radioterapia — CPU Sequenziale\n");
+    printf("  Monte Carlo per Radioterapia — CPU Parallelo\n");
     printf("\n  Parametri:\n");
     printf("  Phantom    : %dx%dx%d voxel  |  voxel %.0fmm  |  %.0f³ cm³\n", NX, NY, NZ, VOXEL_CM * 10.0, PHANTOM_CM);
     printf("  Materiale  : %s\n", phantom_label);
     printf("  N fotoni   : %lld\n", num_fotoni);
     printf("  Seed       : %llu\n", (unsigned long long)seed);
-    printf("  ECUT       : %.0f keV\n\n", ECUT * 1000.0);
+    printf("  ECUT       : %.0f keV\n", ECUT * 1000.0);
+    printf("  Thread     : %d\n\n", num_thread);
 
-    int *phantom = new int [NX * NY * NZ];
+    int *phantom = new int[NX * NY * NZ];
     double *dose = new double[NX * NY * NZ]();
     double *pdd = new double[NZ];
     double *coordinate_cm = new double[NZ];
-    double *profilo_dose = new double[NX];
+    double *profilo_dose  = new double[NX];
     double *coordinate_cm_laterali = new double[NX];
 
     if (tipo_phantom == 0){
@@ -237,32 +288,35 @@ int main(int argc, char *argv[]) {
         costruzione_phantom_acquaosso(phantom);
     }
 
-    Spettro spettro;
-    Xoshiro256 rng(seed);
-
     printf(" Avvio simulazione \n");
     auto tempo_inizio_esatto = std::chrono::high_resolution_clock::now();
 
-    long long report_step = std::max(1LL, num_fotoni / 20);   // report ogni 5%
+    std::atomic<long long> contatore{0};
 
-    for (long long i = 0; i < num_fotoni; i++) {
-        if ((i + 1) % report_step == 0) {
-            auto tempo_attuale     = std::chrono::high_resolution_clock::now();
-            double tempo_esecuzione = std::chrono::duration<double>(tempo_attuale - tempo_inizio_esatto).count();
-            double rate  = (i + 1) / tempo_esecuzione;
-            double tempo_necessrio_fotoni_rimanenti   = (num_fotoni - i - 1) / rate;
-            printf(" [%5.1f%%]  %.0f fotoni/s  Estimated Time of Arrival %.0fs\n", 100.0 * (i + 1) / num_fotoni, rate, tempo_necessrio_fotoni_rimanenti);
-        }
-
-        Fotone p = genera_fotone_iniziale(spettro, rng);
-        trasporto_fotoni(p, phantom, dose, rng);
+    std::vector<std::thread> threads;
+    threads.reserve(num_thread);
+    for (int t = 0; t < num_thread; t++) {
+        ConfigurazioneWorker cfg {
+            .id_thread = t,
+            .numero_thread = num_thread,
+            .numero_fotoni = num_fotoni,
+            .seed_casuale = seed,
+            .phantom = phantom,
+            .dose_globale = dose,
+            .contatore_progresso = contatore,
+            .istante_inizio = tempo_inizio_esatto
+        };
+        threads.emplace_back(worker, cfg);
     }
+
+    for (auto &th : threads)
+        th.join();
 
     auto tempo_fine_esatto = std::chrono::high_resolution_clock::now();
     double tempo_esecuzione = std::chrono::duration<double>(tempo_fine_esatto - tempo_inizio_esatto).count();
 
-    stampa_statistiche_dose(dose, num_fotoni, tempo_esecuzione);
 
+    stampa_statistiche_dose(dose, num_fotoni, tempo_esecuzione);
     calcolo_pdd(dose, pdd, coordinate_cm);
     calcolo_profilo_laterale(dose, profilo_dose, coordinate_cm_laterali, 10.0);
     stampa_tabella_pdd(coordinate_cm, pdd, phantom_label);
@@ -272,17 +326,18 @@ int main(int argc, char *argv[]) {
     const char *slice_file;
     const char *bin_file;
 
-    if (tipo_phantom == 0){
-      pdd_file = "./CPU_Sequenziale/pdd_water.csv";
-      profilo_file = "./CPU_Sequenziale/profile_water.csv";
-      slice_file = "./CPU_Sequenziale/dose_slice_water.csv";
-      bin_file = "./CPU_Sequenziale/dose_water.bin";
-    } else{
-      pdd_file = "./CPU_Sequenziale/pdd_hetero.csv";
-      profilo_file = "./CPU_Sequenziale/profile_hetero.csv";
-      slice_file = "./CPU_Sequenziale/dose_slice_hetero.csv";
-      bin_file = "./CPU_Sequenziale/dose_hetero.bin";
+    if (tipo_phantom == 0) {
+        pdd_file = "./CPU_Parallelo/pdd_water.csv";
+        profilo_file = "./CPU_Parallelo/profile_water.csv";
+        slice_file = "./CPU_Parallelo/dose_slice_water.csv";
+        bin_file = "./CPU_Parallelo/dose_water.bin";
+    } else {
+        pdd_file = "./CPU_Parallelo/pdd_hetero.csv";
+        profilo_file = "./CPU_Parallelo/profile_hetero.csv";
+        slice_file = "./CPU_Parallelo/dose_slice_hetero.csv";
+        bin_file = "./CPU_Parallelo/dose_hetero.bin";
     }
+
     salva_pdd_csv(coordinate_cm, pdd, pdd_file);
     salva_profilo_csv(coordinate_cm_laterali, profilo_dose, profilo_file);
     salva_fetta_dose_csv(dose, slice_file);
@@ -295,13 +350,13 @@ int main(int argc, char *argv[]) {
     delete[] profilo_dose;
     delete[] coordinate_cm_laterali;
 
-    char log_file[64];
-    snprintf(log_file, sizeof(log_file), "logs/CPU_SEQ_%d.log", tipo_phantom);
 
+    char log_file[64];
+    snprintf(log_file, sizeof(log_file), "logs/CPU_PAR_%d.log", tipo_phantom);
 
     FILE *f = fopen(log_file, "a");
     if (f) {
-        fprintf(f, "TIMING version=CPU_SEQ_%d n_fotoni=%lld t_sec=%.6f\n",
+        fprintf(f, "TIMING version=CPU_PAR_%d n_fotoni=%lld t_sec=%.6f\n",
                 tipo_phantom, num_fotoni, tempo_esecuzione);
         fclose(f);
     }

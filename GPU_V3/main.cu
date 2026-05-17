@@ -6,14 +6,16 @@
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 
-#include "physics.cuh"
-#include "compton.cuh"
+#define USA_FLOAT 1
+
+#include "physics_float.cuh"
+#include "compton_float.cuh"
 #include "phantom.cuh"
 #include "output.cuh"
 
 #define CUDA_CHECK(operazione)                                                  \
     do {                                                                        \
-        cudaError_t risultato = (operazione);                                         \
+        cudaError_t risultato = (operazione);                                   \
         if (risultato != cudaSuccess) {                                         \
             fprintf(stderr, "CUDA error %s:%d  %s\n",                           \
                     __FILE__, __LINE__, cudaGetErrorString(risultato));         \
@@ -27,7 +29,15 @@ struct Fotone {
     double energia;
 };
 
-__device__ inline double genera_rng(curandStatePhilox4_32_10_t *stato) {
+__device__ inline float genera_rng_f(curandStatePhilox4_32_10_t *stato) {
+    float valore;
+    do {
+        valore = curand_uniform(stato);
+    } while (valore >= 1.0f);
+    return valore;
+}
+
+__device__ inline double genera_rng_d(curandStatePhilox4_32_10_t *stato) {
     double valore;
     do {
         valore = curand_uniform_double(stato);
@@ -38,21 +48,21 @@ __device__ inline double genera_rng(curandStatePhilox4_32_10_t *stato) {
 __constant__ double FLUENZA[NUMERO_BINS_SPETTRO];
 
 __device__ inline double campiona_energia(curandStatePhilox4_32_10_t *stato_casuale) {
-    double punto_campionamento = genera_rng(stato_casuale);
+    float punto_campionamento = genera_rng_f(stato_casuale);
 
     int indice_limite_inferiore = 0;
     int indice_limite_superiore = NUMERO_BINS_SPETTRO - 1;
     while (indice_limite_inferiore < indice_limite_superiore) {
         int punto_centrale = (indice_limite_inferiore + indice_limite_superiore) / 2;
-        if (FLUENZA[punto_centrale] < punto_campionamento)
+        if ((float)FLUENZA[punto_centrale] < punto_campionamento)
             indice_limite_inferiore = punto_centrale + 1;
         else
             indice_limite_superiore = punto_centrale;
     }
 
     double energia_centrale = ENERGIE_SPETTRO[indice_limite_inferiore];
-    double offset = (genera_rng(stato_casuale) - 0.5) * 0.25;
-    double energia = energia_centrale + offset;
+    float offset = (genera_rng_f(stato_casuale) - 0.5f) * 0.25f;
+    double energia = energia_centrale + (double)offset;
     if (energia < 0.01)
         energia = 0.01;
     if (energia > 6.00)
@@ -65,66 +75,68 @@ __device__ inline Fotone genera_fotone_iniziale(curandStatePhilox4_32_10_t *stat
     double cy = PHANTOM_CM / 2.0;
 
     Fotone p;
-    p.x = cx + (curand_uniform_double(stato_casuale) * 2.0 - 1.0) * SEMI_AMPIEZZA_CAMPO;
-    p.y = cy + (curand_uniform_double(stato_casuale) * 2.0 - 1.0) * SEMI_AMPIEZZA_CAMPO;
+    p.x = cx + (double)(genera_rng_f(stato_casuale) * 2.0f - 1.0f) * SEMI_AMPIEZZA_CAMPO;
+    p.y = cy + (double)(genera_rng_f(stato_casuale) * 2.0f - 1.0f) * SEMI_AMPIEZZA_CAMPO;
     p.z = 1.0e-7;
-    p.ux = 0.0;
-    p.uy = 0.0;
-    p.uz = 1.0;
+    p.ux = 0.0; p.uy = 0.0; p.uz = 1.0;
     p.energia = campiona_energia(stato_casuale);
     return p;
 }
 
 __device__ inline double distanza_limite_voxel( double x, double y, double z, double ux, double uy, double uz, int ix, int iy, int iz) {
-double distanza_minima_confine = 1.0e30; // inizializzata a infinito
-    if (std::fabs(ux) > 1.0e-12) {
+    float distanza_minima_confine = 1.0e30f; // inizializzata a infinito
+    if (fabs(ux) > 1.0e-12) {
         double confine_voxel_X;
         if (ux > 0){
             confine_voxel_X = (ix + 1) * VOXEL_CM;
         } else{
             confine_voxel_X = ix * VOXEL_CM;
         }
-        double distanza_lineare = (confine_voxel_X - x) / ux;
+        float distanza_lineare = (float)(confine_voxel_X - x) / (float)ux;
         if (distanza_lineare > 1.0e-10){
-            distanza_minima_confine = fmin(distanza_minima_confine, distanza_lineare);
+            distanza_minima_confine = fminf(distanza_minima_confine, distanza_lineare);
         }
     }
-    if (std::fabs(uy) > 1.0e-12) {
+    if (fabs(uy) > 1.0e-12) {
         double confine_voxel_Y;
         if (uy > 0){
             confine_voxel_Y = (iy + 1) * VOXEL_CM;
         } else{
             confine_voxel_Y = iy * VOXEL_CM;
         }
-        double distanza_lineare = (confine_voxel_Y - y) / uy;
+        float distanza_lineare = (float)(confine_voxel_Y - y) / (float)uy;
         if (distanza_lineare > 1.0e-10){
-            distanza_minima_confine = fmin(distanza_minima_confine, distanza_lineare);
+            distanza_minima_confine = fminf(distanza_minima_confine, distanza_lineare);
         }
     }
-    if (std::fabs(uz) > 1.0e-12) {
+    if (fabs(uz) > 1.0e-12) {
         double confine_voxel_Z;
         if (uz > 0){
             confine_voxel_Z = (iz + 1) * VOXEL_CM;
-        } else{
+        }
+        else{
             confine_voxel_Z = iz * VOXEL_CM;
         }
-        double distanza_lineare = (confine_voxel_Z - z) / uz;
+        float distanza_lineare = (float)(confine_voxel_Z - z) / (float)uz;
         if (distanza_lineare > 1.0e-10) {
-            distanza_minima_confine = fmin(distanza_minima_confine, distanza_lineare);
+            distanza_minima_confine = fminf(distanza_minima_confine, distanza_lineare);
         }
     }
     return distanza_minima_confine;
 }
 
-__device__ void trasporto_fotoni( Fotone fotone_iniziale, const int *phantom, double *dose, curandStatePhilox4_32_10_t *stato_casuale)
-{
+
+__device__ void trasporto_fotoni(Fotone fotone_iniziale, cudaTextureObject_t texture_phantom, double *dose, curandStatePhilox4_32_10_t *stato_casuale) {
+
     Fotone stack[64];
     int num_particelle_stack = 0;
     stack[num_particelle_stack++] = fotone_iniziale;
 
     while (num_particelle_stack > 0) {
         Fotone particella_corrente = stack[--num_particelle_stack];
+
         for (int step = 0; step < 100000; step++) {
+
             if (particella_corrente.energia < ECUT) {
                 if (verifica_confini(particella_corrente.x, particella_corrente.y, particella_corrente.z)) {
                     int id = phantom_idx(vox(particella_corrente.x), vox(particella_corrente.y), vox(particella_corrente.z));
@@ -135,20 +147,19 @@ __device__ void trasporto_fotoni( Fotone fotone_iniziale, const int *phantom, do
 
             if (!verifica_confini(particella_corrente.x, particella_corrente.y, particella_corrente.z))
                 break;
+
             int ix = vox(particella_corrente.x);
             int iy = vox(particella_corrente.y);
             int iz = vox(particella_corrente.z);
-            int materiale = phantom[phantom_idx(ix, iy, iz)];
-            double mu = calcolo_attenuazione_totale(particella_corrente.energia, materiale);
-            if (mu <= 0.0)
-                break;
+            int materiale = tex3D<int>(texture_phantom, ix + 0.5f, iy + 0.5f, iz + 0.5f);
 
-            // Campiona cammino libero medio
-            double xi = genera_rng(stato_casuale);
-            double distanza_teorica = -log(xi) / mu;
+            double mu = calcolo_attenuazione_totale(particella_corrente.energia, materiale);
+            if (mu <= 0.0) break;
+
+            double distanza_teorica = -log(genera_rng_d(stato_casuale)) / mu;
             double distanza_fisica = distanza_limite_voxel(particella_corrente.x, particella_corrente.y, particella_corrente.z, particella_corrente.ux, particella_corrente.uy, particella_corrente.uz, ix, iy, iz);
 
-            if (distanza_teorica <= distanza_fisica) {
+            if (distanza_teorica <= (double)distanza_fisica) {
                 particella_corrente.x += particella_corrente.ux * distanza_teorica;
                 particella_corrente.y += particella_corrente.uy * distanza_teorica;
                 particella_corrente.z += particella_corrente.uz * distanza_teorica;
@@ -159,35 +170,33 @@ __device__ void trasporto_fotoni( Fotone fotone_iniziale, const int *phantom, do
                 ix = vox(particella_corrente.x);
                 iy = vox(particella_corrente.y);
                 iz = vox(particella_corrente.z);
-                materiale = phantom[phantom_idx(ix, iy, iz)];
+                materiale = tex3D<int>(texture_phantom, ix + 0.5f, iy + 0.5f, iz + 0.5f);
                 int id = phantom_idx(ix, iy, iz);
 
-                int tipo_interazione = seleziona_tipo_interazione(particella_corrente.energia, materiale, genera_rng(stato_casuale));
+                int tipo_interazione = seleziona_tipo_interazione(particella_corrente.energia, materiale, genera_rng_f(stato_casuale));
 
                 if (tipo_interazione == 0) {
                     atomicAdd(&dose[id], particella_corrente.energia);
                     break;
                 }
-                // -------- COMPTON (Kahn) --------
                 else if (tipo_interazione == 1) {
                     double cos_theta;
                     double energia_scatter;
                     while (true) {
-                        double xi1 = genera_rng(stato_casuale);
-                        double xi2 = genera_rng(stato_casuale);
-                        double xi3 = genera_rng(stato_casuale);
+                        float xi1 = genera_rng_f(stato_casuale);
+                        float xi2 = genera_rng_f(stato_casuale);
+                        float xi3 = genera_rng_f(stato_casuale);
                         metodo_kahn(particella_corrente.energia, xi1, xi2, xi3, cos_theta, energia_scatter);
-                        if (cos_theta <= 1.0) break;
+                        if (cos_theta <= 1.0)
+                            break;
                     }
 
                     double energia_ceduta = particella_corrente.energia - energia_scatter;
-
-                    if (energia_ceduta > 0.0) {
+                    if (energia_ceduta > 0.0)
                         atomicAdd(&dose[id], energia_ceduta);
-                    }
 
                     particella_corrente.energia = energia_scatter;
-                    double phi = 2.0 * PI * genera_rng(stato_casuale);
+                    float phi = 2.0f * (float)PI * genera_rng_f(stato_casuale);
                     aggiornamento_traiettoria(particella_corrente.ux, particella_corrente.uy, particella_corrente.uz, cos_theta, phi);
 
                     if (particella_corrente.energia < ECUT) {
@@ -197,22 +206,21 @@ __device__ void trasporto_fotoni( Fotone fotone_iniziale, const int *phantom, do
                 }
                 else {
                     double energia_cinetica_residua = particella_corrente.energia - 2.0 * ME_C2;
-                    if (energia_cinetica_residua > 0.0) {
+                    if (energia_cinetica_residua > 0.0)
                         atomicAdd(&dose[id], energia_cinetica_residua);
-                    }
 
                     if (ME_C2 > ECUT && num_particelle_stack + 2 <= 62) {
-                        double cos_theta = 2.0 * genera_rng(stato_casuale) - 1.0;
-                        double phi_a  = 2.0 * PI * genera_rng(stato_casuale);
-                        double sen_theta = sqrt(fmax(0.0, 1.0 - cos_theta * cos_theta));
+                        float cos_theta_f = 2.0f * genera_rng_f(stato_casuale) - 1.0f;
+                        float phi_a = 2.0f * (float)PI * genera_rng_f(stato_casuale);
+                        float sen_theta = sqrtf(fmaxf(0.0f, 1.0f - cos_theta_f * cos_theta_f));
 
                         Fotone fotone_secondario_1, fotone_secondario_2;
                         fotone_secondario_1.x = fotone_secondario_2.x = particella_corrente.x;
                         fotone_secondario_1.y = fotone_secondario_2.y = particella_corrente.y;
                         fotone_secondario_1.z = fotone_secondario_2.z = particella_corrente.z;
-                        fotone_secondario_1.ux =  sen_theta * cos(phi_a);
-                        fotone_secondario_1.uy =  sen_theta * sin(phi_a);
-                        fotone_secondario_1.uz =  cos_theta;
+                        fotone_secondario_1.ux =  (double)(sen_theta * cosf(phi_a));
+                        fotone_secondario_1.uy =  (double)(sen_theta * sinf(phi_a));
+                        fotone_secondario_1.uz =  (double)cos_theta_f;
                         fotone_secondario_2.ux = -fotone_secondario_1.ux;
                         fotone_secondario_2.uy = -fotone_secondario_1.uy;
                         fotone_secondario_2.uz = -fotone_secondario_1.uz;
@@ -226,36 +234,34 @@ __device__ void trasporto_fotoni( Fotone fotone_iniziale, const int *phantom, do
 
             } else {
                 const double eps = 1.0e-7;
-                particella_corrente.x += particella_corrente.ux * (distanza_fisica + eps);
-                particella_corrente.y += particella_corrente.uy * (distanza_fisica + eps);
-                particella_corrente.z += particella_corrente.uz * (distanza_fisica + eps);
+                particella_corrente.x += particella_corrente.ux * ((double)distanza_fisica + eps);
+                particella_corrente.y += particella_corrente.uy * ((double)distanza_fisica + eps);
+                particella_corrente.z += particella_corrente.uz * ((double)distanza_fisica + eps);
             }
-
         }
     }
 }
 
-__global__ void mc_kernel( long long num_fotoni, const int *phantom, double *dose, uint64_t seed_base) {
-    long long indice_thread = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (indice_thread >= num_fotoni)
-        return;
-
-    curandStatePhilox4_32_10_t stato_casuale;
-    curand_init(seed_base, (unsigned long long)indice_thread, 0, &stato_casuale);
-
-    Fotone p = genera_fotone_iniziale(&stato_casuale);
-    trasporto_fotoni(p, phantom, dose, &stato_casuale);
+__global__ void mc_kernel(long long num_fotoni, cudaTextureObject_t phantom, double *dose, unsigned long long *contatori_fotoni_procesati, uint64_t seed_base) {
+    while (true) {
+        unsigned long long id_fotone = atomicAdd(contatori_fotoni_procesati, 1ULL);
+        if ((long long)id_fotone >= num_fotoni)
+            break;
+        curandStatePhilox4_32_10_t stato_rng;
+        curand_init(seed_base, id_fotone, 0, &stato_rng);
+        Fotone p = genera_fotone_iniziale(&stato_rng);
+        trasporto_fotoni(p, phantom, dose, &stato_rng);
+    }
 }
 
-static void calcola_FLUENZA(double distribuzione_cumulata[NUMERO_BINS_SPETTRO]) {
+static void calcola_fluenza(double distribuzione_cumulata[NUMERO_BINS_SPETTRO]) {
     static const double FLUENZA[NUMERO_BINS_SPETTRO] = {
         0.0243, 0.0676, 0.0862, 0.0929, 0.0919, 0.0868, 0.0794, 0.0712,
         0.0628, 0.0548, 0.0471, 0.0399, 0.0334, 0.0276, 0.0224, 0.0178,
         0.0138, 0.0104, 0.0075, 0.0052, 0.0034, 0.0020, 0.0010, 0.0004
     };
     double somma_totale = 0.0;
-    for (int i = 0; i < NUMERO_BINS_SPETTRO; i++)
-        somma_totale += FLUENZA[i];
+    for (int i = 0; i < NUMERO_BINS_SPETTRO; i++) somma_totale += FLUENZA[i];
     distribuzione_cumulata[0] = FLUENZA[0] / somma_totale;
     for (int i = 1; i < NUMERO_BINS_SPETTRO; i++)
         distribuzione_cumulata[i] = distribuzione_cumulata[i-1] + FLUENZA[i] / somma_totale;
@@ -264,9 +270,9 @@ static void calcola_FLUENZA(double distribuzione_cumulata[NUMERO_BINS_SPETTRO]) 
 
 int main(int argc, char *argv[]) {
 
-    long long num_fotoni = 1000000;
+    long long num_fotoni  = 1000000;
     int tipo_phantom = 0;
-    uint64_t seed = 42ULL;
+    uint64_t  seed = 42ULL;
 
     if (argc > 1) num_fotoni = std::atoll(argv[1]);
     if (argc > 2) tipo_phantom = std::atoi(argv[2]);
@@ -281,10 +287,9 @@ int main(int argc, char *argv[]) {
 
     cudaDeviceProp properties;
     CUDA_CHECK(cudaGetDeviceProperties(&properties, 0));
-    printf("  Monte Carlo per Radioterapia — GPU CUDA\n\n");
+    printf("  Monte Carlo per Radioterapia — GPU CUDA  V3 \n\n");
     printf("  GPU        : %s  (SM %d.%d)\n", properties.name, properties.major, properties.minor);
-    printf("  Modalità   : Ciclo completo (Compton+PE+Pair)\n");
-    printf("  Phantom    : %dx%dx%d voxel  |  voxel %.0fmm  |  %.0f³ cm³\n", NX, NY, NZ, VOXEL_CM * 10.0, PHANTOM_CM);
+    printf("  Phantom    : %dx%dx%d voxel  |  voxel %.0fmm  |  %.0f^3 cm^3\n", NX, NY, NZ, VOXEL_CM * 10.0, PHANTOM_CM);
     printf("  Materiale  : %s\n", phantom_label);
     printf("  N fotoni   : %lld\n", num_fotoni);
     printf("  Seed       : %llu\n", (unsigned long long)seed);
@@ -299,22 +304,52 @@ int main(int argc, char *argv[]) {
         costruzione_phantom_acquaosso(host_phantom);
     }
 
-    int *device_panthom;
-    double *device_dose;
-    CUDA_CHECK(cudaMalloc(&device_panthom, NX * NY * NZ * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&device_dose,    NX * NY * NZ * sizeof(double)));
-    CUDA_CHECK(cudaMemset(device_dose, 0,  NX * NY * NZ * sizeof(double)));
+    cudaArray_t device_phantom_array;
+    cudaChannelFormatDesc tipoCanale = cudaCreateChannelDesc<int>();
+    cudaExtent estensioneVolume = make_cudaExtent(NX, NY, NZ);
+    CUDA_CHECK(cudaMalloc3DArray(&device_phantom_array, &tipoCanale, estensioneVolume));
 
-    double host_distribuizione_cumulata[NUMERO_BINS_SPETTRO];
-    calcola_FLUENZA(host_distribuizione_cumulata);
-    CUDA_CHECK(cudaMemcpyToSymbol(FLUENZA, host_distribuizione_cumulata, NUMERO_BINS_SPETTRO * sizeof(double)));
+    cudaMemcpy3DParms parametriCopia3D = {0};
+    parametriCopia3D.srcPtr = make_cudaPitchedPtr((void*)host_phantom, NX * sizeof(int), NX, NY);
+    parametriCopia3D.dstArray = device_phantom_array;
+    parametriCopia3D.extent = estensioneVolume;
+    parametriCopia3D.kind = cudaMemcpyHostToDevice;
+    CUDA_CHECK(cudaMemcpy3D(&parametriCopia3D));
+
+    cudaResourceDesc sorgenteTexture = {};
+    sorgenteTexture.resType = cudaResourceTypeArray;
+    sorgenteTexture.res.array.array = device_phantom_array;
+
+    cudaTextureDesc texDesc = {};
+    texDesc.addressMode[0] = cudaAddressModeClamp;
+    texDesc.addressMode[1] = cudaAddressModeClamp;
+    texDesc.addressMode[2] = cudaAddressModeClamp;
+    texDesc.filterMode = cudaFilterModePoint;
+    texDesc.readMode = cudaReadModeElementType;
+    texDesc.normalizedCoords = 0;
+
+    cudaTextureObject_t texture_phantom = 0;
+    CUDA_CHECK(cudaCreateTextureObject(&texture_phantom, &sorgenteTexture, &texDesc, NULL));
+
+
+    double *device_dose;
+    unsigned long long *contatori_fotoni_procesati;
+
+    CUDA_CHECK(cudaMalloc(&device_dose, NX * NY * NZ * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&contatori_fotoni_procesati, sizeof(unsigned long long)));
+    CUDA_CHECK(cudaMemset(device_dose, 0, NX * NY * NZ * sizeof(double)));
+    CUDA_CHECK(cudaMemset(contatori_fotoni_procesati, 0, sizeof(unsigned long long)));
+
+    double host_distribuzione_cumulata[NUMERO_BINS_SPETTRO];
+    calcola_fluenza(host_distribuzione_cumulata);
+    CUDA_CHECK(cudaMemcpyToSymbol(FLUENZA, host_distribuzione_cumulata, NUMERO_BINS_SPETTRO * sizeof(double)));
 
     double *host_dose = new double[NX * NY * NZ];
 
     const int DIMENSIONE_BLOCCO = 256;
-    long long numero_blocchi = (num_fotoni + DIMENSIONE_BLOCCO - 1) / DIMENSIONE_BLOCCO;
+    const int NUMERO_BLOCCHI    = 1024;
 
-    printf(" Avvio simulazione GPU\n");
+    printf(" Avvio simulazione GPU V3 \n");
 
     cudaEvent_t inizio_copia, fine_copia, inizio_kernel, fine_kernel, inizio_totale, fine_totale;
     cudaEventCreate(&inizio_copia); cudaEventCreate(&fine_copia);
@@ -322,12 +357,12 @@ int main(int argc, char *argv[]) {
     cudaEventCreate(&inizio_totale); cudaEventCreate(&fine_totale);
 
     cudaEventRecord(inizio_copia);
-    CUDA_CHECK(cudaMemcpy(device_panthom, host_phantom, NX * NY * NZ * sizeof(int), cudaMemcpyHostToDevice));
+
     cudaEventRecord(fine_copia);
     cudaEventSynchronize(fine_copia);
 
     cudaEventRecord(inizio_kernel);
-    mc_kernel<<<(int)numero_blocchi, DIMENSIONE_BLOCCO>>>(num_fotoni, device_panthom, device_dose, seed);
+    mc_kernel<<<NUMERO_BLOCCHI, DIMENSIONE_BLOCCO>>>(num_fotoni, texture_phantom, device_dose, contatori_fotoni_procesati, seed);
     cudaEventRecord(fine_kernel);
     cudaEventSynchronize(fine_kernel);
     CUDA_CHECK(cudaGetLastError());
@@ -343,7 +378,7 @@ int main(int argc, char *argv[]) {
     cudaEventElapsedTime(&ms_copia_da_gpu, inizio_totale, fine_totale);
 
     double tempo_calcolo_secondi = ms_calcolo_gpu / 1000.0;
-    double tempo_totale_secondi  = (ms_copia_a_gpu + ms_calcolo_gpu + ms_copia_da_gpu) / 1000.0;
+    double tempo_totale_secondi = (ms_copia_a_gpu + ms_calcolo_gpu + ms_copia_da_gpu) / 1000.0;
 
     cudaEventDestroy(inizio_copia); cudaEventDestroy(fine_copia);
     cudaEventDestroy(inizio_kernel); cudaEventDestroy(fine_kernel);
@@ -351,7 +386,7 @@ int main(int argc, char *argv[]) {
 
     stampa_statistiche_dose(host_dose, num_fotoni, tempo_calcolo_secondi);
 
-    double *pdd     = new double[NZ];
+    double *pdd = new double[NZ];
     double *coordinate_cm = new double[NZ];
     double *profilo_dose = new double[NX];
     double *coordinate_cm_laterali = new double[NX];
@@ -361,17 +396,16 @@ int main(int argc, char *argv[]) {
     stampa_tabella_pdd(coordinate_cm, pdd, phantom_label);
 
     char pdd_file[256], profilo_file[256], slice_file[256], bin_file[256];
-
     if (tipo_phantom == 0) {
-        snprintf(pdd_file, sizeof(pdd_file), "./GPU_V1/pdd_water.csv");
-        snprintf(profilo_file, sizeof(profilo_file), "./GPU_V1/profile_water.csv");
-        snprintf(slice_file, sizeof(slice_file), "./GPU_V1/dose_slice_water.csv");
-        snprintf(bin_file, sizeof(bin_file), "./GPU_V1/dose_water.bin");
+        snprintf(pdd_file, sizeof(pdd_file), "./GPU_V3/pdd_water.csv");
+        snprintf(profilo_file, sizeof(profilo_file), "./GPU_V3/profile_water.csv");
+        snprintf(slice_file, sizeof(slice_file), "./GPU_V3/dose_slice_water.csv");
+        snprintf(bin_file, sizeof(bin_file), "./GPU_V3/dose_water.bin");
     } else {
-        snprintf(pdd_file, sizeof(pdd_file), "./GPU_V1/pdd_hetero.csv");
-        snprintf(profilo_file, sizeof(profilo_file), "./GPU_V1/profile_hetero.csv");
-        snprintf(slice_file, sizeof(slice_file), "./GPU_V1/dose_slice_hetero.csv");
-        snprintf(bin_file, sizeof(bin_file), "./GPU_V1/dose_hetero.bin");
+        snprintf(pdd_file, sizeof(pdd_file), "./GPU_V3/pdd_hetero.csv");
+        snprintf(profilo_file, sizeof(profilo_file), "./GPU_V3/profile_hetero.csv");
+        snprintf(slice_file, sizeof(slice_file), "./GPU_V3/dose_slice_hetero.csv");
+        snprintf(bin_file, sizeof(bin_file), "./GPU_V3/dose_hetero.bin");
     }
 
     salva_pdd_csv(coordinate_cm, pdd, pdd_file);
@@ -379,8 +413,11 @@ int main(int argc, char *argv[]) {
     salva_fetta_dose_csv(host_dose, slice_file);
     salva_volume_completo(host_dose, bin_file);
 
-    cudaFree(device_panthom);
+
+    CUDA_CHECK(cudaDestroyTextureObject(texture_phantom));
+    CUDA_CHECK(cudaFreeArray(device_phantom_array));
     cudaFree(device_dose);
+    cudaFree(contatori_fotoni_procesati);
     delete[] host_phantom;
     delete[] host_dose;
     delete[] pdd;
@@ -389,11 +426,10 @@ int main(int argc, char *argv[]) {
     delete[] coordinate_cm_laterali;
 
     char log_file[64];
-    snprintf(log_file, sizeof(log_file), "logs/GPU_V1_%d.log", tipo_phantom);
-
+    snprintf(log_file, sizeof(log_file), "logs/GPU_V3_%d.log", tipo_phantom);
     FILE *f = fopen(log_file, "a");
     if (f) {
-        fprintf(f, "TIMING version=GPU_V1_%d n_fotoni=%lld "
+        fprintf(f, "TIMING version=GPU_V3_%d n_fotoni=%lld "
                    "t_h2d_ms=%.3f t_kernel_ms=%.3f t_d2h_ms=%.3f "
                    "tempo_totale_secondi=%.6f\n",
                 tipo_phantom, num_fotoni,

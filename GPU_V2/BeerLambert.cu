@@ -7,7 +7,6 @@
 #include <curand_kernel.h>
 
 #include "physics.cuh"
-#include "compton.cuh"
 #include "phantom.cuh"
 #include "output.cuh"
 
@@ -20,13 +19,6 @@
             exit(EXIT_FAILURE);                                                 \
         }                                                                       \
     } while (0)
-
-
-struct Fotone {
-    double x, y, z;
-    double ux, uy, uz;
-    double energia;
-};
 
 __device__ inline double genera_rng(curandStatePhilox4_32_10_t *stato) {
     double valore;
@@ -61,41 +53,6 @@ __device__ inline double campiona_energia(curandStatePhilox4_32_10_t *stato_casu
     return energia;
 }
 
-__global__ void mc_beer_lambert_kernel( long long num_fotoni, const int *phantom, double *dose, uint64_t seed_base){
-    long long indice_thread = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (indice_thread >= num_fotoni)
-        return;
-
-    curandStatePhilox4_32_10_t stato_casuale;
-    curand_init(seed_base, (unsigned long long)indice_thread, 0, &stato_casuale);
-
-    double cx = PHANTOM_CM / 2.0;
-    double cy = PHANTOM_CM / 2.0;
-
-    Fotone p;
-    p.x = cx + (curand_uniform_double(&stato_casuale) * 2.0 - 1.0) * SEMI_AMPIEZZA_CAMPO;
-    p.y = cy + (curand_uniform_double(&stato_casuale) * 2.0 - 1.0) * SEMI_AMPIEZZA_CAMPO;
-    p.z = 1.0e-7;
-    p.ux = 0.0; p.uy = 0.0; p.uz = 1.0;
-    p.energia = campiona_energia(&stato_casuale);
-
-    while (p.energia > ECUT && verifica_confini(p.x, p.y, p.z)) {
-        int materiale = phantom[phantom_idx(vox(p.x), vox(p.y), vox(p.z))];
-        double mu = calcolo_attenuazione_totale(p.energia, materiale);
-        double distanza_percorsa  = -log(genera_rng(&stato_casuale)) / mu;
-
-        p.x += p.ux * distanza_percorsa;
-        p.y += p.uy * distanza_percorsa;
-        p.z += p.uz * distanza_percorsa;
-
-        if (verifica_confini(p.x, p.y, p.z)) {
-            int id = phantom_idx(vox(p.x), vox(p.y), vox(p.z));
-            atomicAdd(&dose[id], p.energia);
-            break;
-        }
-    }
-}
-
 static void calcola_fluenza(double distribuzione_cumulata[NUMERO_BINS_SPETTRO]) {
     static const double FLUENZA[NUMERO_BINS_SPETTRO] = {
         0.0243, 0.0676, 0.0862, 0.0929, 0.0919, 0.0868, 0.0794, 0.0712,
@@ -110,8 +67,48 @@ static void calcola_fluenza(double distribuzione_cumulata[NUMERO_BINS_SPETTRO]) 
     distribuzione_cumulata[NUMERO_BINS_SPETTRO-1] = 1.0;
 }
 
-int main(int argc, char *argv[]) {
+__global__ void mc_beer_lambert_kernel( long long num_fotoni, const int *phantom, double *dose, unsigned long long *contatore_fotoni_processati, uint64_t seed_base)
+{
+    while (true) {
+        unsigned long long indice_thread = atomicAdd(contatore_fotoni_processati, 1ULL);
+        if ((long long)indice_thread >= num_fotoni)
+            break;
+        curandStatePhilox4_32_10_t stato_casuale;
+        curand_init(seed_base, indice_thread, 0, &stato_casuale);
 
+        double cx = PHANTOM_CM / 2.0;
+        double cy = PHANTOM_CM / 2.0;
+
+        double x = cx + (curand_uniform_double(&stato_casuale) * 2.0 - 1.0) * SEMI_AMPIEZZA_CAMPO;
+        double y = cy + (curand_uniform_double(&stato_casuale) * 2.0 - 1.0) * SEMI_AMPIEZZA_CAMPO;
+        double z = 1.0e-7;
+        double ux = 0.0, uy = 0.0, uz = 1.0;
+        double energia = campiona_energia(&stato_casuale);
+
+        while (energia > ECUT && verifica_confini(x, y, z)) {
+            int ix = vox(x);
+            int iy = vox(y);
+            int iz = vox(z);
+            int materiale = phantom[phantom_idx(ix, iy, iz)];
+
+            double mu = calcolo_attenuazione_totale(energia, materiale);
+            double distanza_percorsa = -log(genera_rng(&stato_casuale)) / mu;
+
+            x += ux * distanza_percorsa;
+            y += uy * distanza_percorsa;
+            z += uz * distanza_percorsa;
+
+            if (verifica_confini(x, y, z)) {
+                int id = phantom_idx(vox(x), vox(y), vox(z));
+                atomicAdd(&dose[id], energia);
+                break;
+            }
+        }
+
+    }
+}
+
+int main(int argc, char *argv[]) {
     long long num_fotoni = 1000000;
     int tipo_phantom = 0;
     uint64_t seed = 42ULL;
@@ -119,7 +116,6 @@ int main(int argc, char *argv[]) {
     if (argc > 1) num_fotoni = std::atoll(argv[1]);
     if (argc > 2) tipo_phantom = std::atoi(argv[2]);
     if (argc > 3) seed = (uint64_t)std::atoll(argv[3]);
-
 
     const char *phantom_label;
     if (tipo_phantom == 0){
@@ -130,9 +126,9 @@ int main(int argc, char *argv[]) {
 
     cudaDeviceProp properties;
     CUDA_CHECK(cudaGetDeviceProperties(&properties, 0));
-    printf("  Monte Carlo per Radioterapia — GPU CUDA\n\n");
+
+    printf("  Monte Carlo per Radioterapia — GPU CUDA  [Beer-Lambert  V2]\n\n");
     printf("  GPU        : %s  (SM %d.%d)\n", properties.name, properties.major, properties.minor);
-    printf("  Modalità   : Beer-Lambert semplificato\n");
     printf("  Phantom    : %dx%dx%d voxel  |  voxel %.0fmm  |  %.0f³ cm³\n", NX, NY, NZ, VOXEL_CM * 10.0, PHANTOM_CM);
     printf("  Materiale  : %s\n", phantom_label);
     printf("  N fotoni   : %lld\n", num_fotoni);
@@ -149,21 +145,26 @@ int main(int argc, char *argv[]) {
     }
 
     int *device_panthom;
-    double *device_dose;
     CUDA_CHECK(cudaMalloc(&device_panthom, NX * NY * NZ * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&device_dose,    NX * NY * NZ * sizeof(double)));
-    CUDA_CHECK(cudaMemset(device_dose, 0,  NX * NY * NZ * sizeof(double)));
+    CUDA_CHECK(cudaMemcpy(device_panthom, host_phantom, NX * NY * NZ * sizeof(int), cudaMemcpyHostToDevice));
+
+    double *device_dose;
+    CUDA_CHECK(cudaMalloc(&device_dose, NX * NY * NZ * sizeof(double)));
+    CUDA_CHECK(cudaMemset(device_dose, 0, NX * NY * NZ * sizeof(double)));
 
     double host_distribuizione_cumulata[NUMERO_BINS_SPETTRO];
     calcola_fluenza(host_distribuizione_cumulata);
     CUDA_CHECK(cudaMemcpyToSymbol(FLUENZA, host_distribuizione_cumulata, NUMERO_BINS_SPETTRO * sizeof(double)));
 
-    double *host_dose = new double[NX * NY * NZ];
+    unsigned long long *contatore_fotoni_processati;
+    CUDA_CHECK(cudaMalloc(&contatore_fotoni_processati, sizeof(unsigned long long)));
+    CUDA_CHECK(cudaMemset(contatore_fotoni_processati, 0, sizeof(unsigned long long)));
+
 
     const int DIMENSIONE_BLOCCO = 256;
-    long long numero_blocchi = (num_fotoni + DIMENSIONE_BLOCCO - 1) / DIMENSIONE_BLOCCO;
+    const int NUMERO_BLOCCHI = 1024;
 
-    printf(" Avvio simulazione GPU\n");
+    printf(" Avvio simulazione GPU \n");
 
     cudaEvent_t inizio_copia, fine_copia, inizio_kernel, fine_kernel, inizio_totale, fine_totale;
     cudaEventCreate(&inizio_copia); cudaEventCreate(&fine_copia);
@@ -176,10 +177,12 @@ int main(int argc, char *argv[]) {
     cudaEventSynchronize(fine_copia);
 
     cudaEventRecord(inizio_kernel);
-    mc_beer_lambert_kernel<<<(int)numero_blocchi, DIMENSIONE_BLOCCO>>>(num_fotoni, device_panthom, device_dose, seed);
+    mc_beer_lambert_kernel<<<NUMERO_BLOCCHI, DIMENSIONE_BLOCCO>>>( num_fotoni, device_panthom, device_dose, contatore_fotoni_processati, seed);
     cudaEventRecord(fine_kernel);
     cudaEventSynchronize(fine_kernel);
     CUDA_CHECK(cudaGetLastError());
+
+    double *host_dose = new double[NX * NY * NZ];
 
     cudaEventRecord(inizio_totale);
     CUDA_CHECK(cudaMemcpy(host_dose, device_dose, NX * NY * NZ * sizeof(double), cudaMemcpyDeviceToHost));
@@ -194,9 +197,11 @@ int main(int argc, char *argv[]) {
     double tempo_calcolo_secondi = ms_calcolo_gpu / 1000.0;
     double tempo_totale_secondi  = (ms_copia_a_gpu + ms_calcolo_gpu + ms_copia_da_gpu) / 1000.0;
 
-    cudaEventDestroy(inizio_copia); cudaEventDestroy(fine_copia);
-    cudaEventDestroy(inizio_kernel); cudaEventDestroy(fine_kernel);
-    cudaEventDestroy(inizio_totale); cudaEventDestroy(fine_totale);
+    cudaEventDestroy(inizio_copia);
+    cudaEventDestroy(fine_copia);
+
+
+    CUDA_CHECK(cudaMemcpy(host_dose, device_dose, NX * NY * NZ * sizeof(double), cudaMemcpyDeviceToHost));
 
     stampa_statistiche_dose(host_dose, num_fotoni, tempo_calcolo_secondi);
 
@@ -209,18 +214,17 @@ int main(int argc, char *argv[]) {
     calcolo_profilo_laterale(host_dose, profilo_dose, coordinate_cm_laterali, 10.0);
     stampa_tabella_pdd(coordinate_cm, pdd, phantom_label);
 
-    char pdd_file[256], profilo_file[256], slice_file[256], bin_file[256];
-
+    const char *pdd_file, *profilo_file, *slice_file, *bin_file;
     if (tipo_phantom == 0) {
-        snprintf(pdd_file, sizeof(pdd_file), "./GPU_V1/pdd_water_BL.csv");
-        snprintf(profilo_file, sizeof(profilo_file), "./GPU_V1/profile_water_BL.csv");
-        snprintf(slice_file, sizeof(slice_file), "./GPU_V1/dose_slice_water_BL.csv");
-        snprintf(bin_file, sizeof(bin_file), "./GPU_V1/dose_water_BL.bin");
+        pdd_file = "./GPU_V2/pdd_water_BL.csv";
+        profilo_file = "./GPU_V2/profile_water_BL.csv";
+        slice_file = "./GPU_V2/dose_slice_water_BL.csv";
+        bin_file = "./GPU_V2/dose_water_BL.bin";
     } else {
-        snprintf(pdd_file, sizeof(pdd_file), "./GPU_V1/pdd_hetero_BL.csv");
-        snprintf(profilo_file, sizeof(profilo_file), "./GPU_V1/profile_hetero_BL.csv");
-        snprintf(slice_file, sizeof(slice_file), "./GPU_V1/dose_slice_hetero_BL.csv");
-        snprintf(bin_file, sizeof(bin_file), "./GPU_V1/dose_hetero_BL.bin");
+        pdd_file = "./GPU_V2/pdd_hetero_BL.csv";
+        profilo_file = "./GPU_V2/profile_hetero_BL.csv";
+        slice_file = "./GPU_V2/dose_slice_hetero_BL.csv";
+        bin_file = "./GPU_V2/dose_hetero_BL.bin";
     }
 
     salva_pdd_csv(coordinate_cm, pdd, pdd_file);
@@ -230,6 +234,7 @@ int main(int argc, char *argv[]) {
 
     cudaFree(device_panthom);
     cudaFree(device_dose);
+    cudaFree(contatore_fotoni_processati);
     delete[] host_phantom;
     delete[] host_dose;
     delete[] pdd;
@@ -237,12 +242,13 @@ int main(int argc, char *argv[]) {
     delete[] profilo_dose;
     delete[] coordinate_cm_laterali;
 
+
     char log_file[64];
-    snprintf(log_file, sizeof(log_file), "logs/GPU_V1_BL_%d.log", tipo_phantom);
+    snprintf(log_file, sizeof(log_file), "logs/GPU_V2_BL_%d.log", tipo_phantom);
 
     FILE *f = fopen(log_file, "a");
     if (f) {
-        fprintf(f, "TIMING version=GPU_V1_BL_%d n_fotoni=%lld "
+        fprintf(f, "TIMING version=GPU_V2_BL_%d n_fotoni=%lld "
                    "t_h2d_ms=%.3f t_kernel_ms=%.3f t_d2h_ms=%.3f "
                    "tempo_totale_secondi=%.6f\n",
                 tipo_phantom, num_fotoni,

@@ -1,0 +1,6 @@
+TIMING version=CPU_SEQ_BL_0 n_fotoni=100000 t_sec=0.014220
+TIMING version=CPU_SEQ_BL_0 n_fotoni=500000 t_sec=0.089769
+TIMING version=CPU_SEQ_BL_0 n_fotoni=1000000 t_sec=0.133995
+TIMING version=CPU_SEQ_BL_0 n_fotoni=5000000 t_sec=0.552298
+TIMING version=CPU_SEQ_BL_0 n_fotoni=10000000 t_sec=1.064388
+TIMING version=CPU_SEQ_BL_0 n_fotoni=50000000 t_sec=5.868588

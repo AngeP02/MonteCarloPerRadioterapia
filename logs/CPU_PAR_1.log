@@ -1,0 +1,6 @@
+TIMING version=CPU_PAR_1 n_fotoni=100000 t_sec=0.804687
+TIMING version=CPU_PAR_1 n_fotoni=500000 t_sec=4.225571
+TIMING version=CPU_PAR_1 n_fotoni=1000000 t_sec=10.016448
+TIMING version=CPU_PAR_1 n_fotoni=5000000 t_sec=45.578868
+TIMING version=CPU_PAR_1 n_fotoni=10000000 t_sec=91.922366
+TIMING version=CPU_PAR_1 n_fotoni=50000000 t_sec=467.558022

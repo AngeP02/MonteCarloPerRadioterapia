@@ -12,84 +12,39 @@
 #include "phantom.h"
 #include "output.h"
 
-// stato di una particella sullo stack
-struct Particle {
+struct Fotone {
     double x, y, z;    // posizione [cm]
     double ux, uy, uz; // versore direzione (normalizzato)
     double energia;     // energia [MeV]
 };
 
-// CAMPIONAMENTO SORGENTE
-inline Particle sample_source(const Spectrum &spettro, Xoshiro256 &rng) {
-    static const double FIELD_HALF = 5.0;   // +-5 cm -> campo 10×10 cm^2
+inline Fotone genera_fotone_iniziale(const Spettro &spettro, Xoshiro256 &rng) {
     double cx = PHANTOM_CM / 2.0;
     double cy = PHANTOM_CM / 2.0;
 
-    Particle p;
-    p.x = cx + (rng() * 2.0 - 1.0) * FIELD_HALF;
-    p.y = cy + (rng() * 2.0 - 1.0) * FIELD_HALF;
+    Fotone p;
+    p.x = cx + (rng() * 2.0 - 1.0) * SEMI_AMPIEZZA_CAMPO;
+    p.y = cy + (rng() * 2.0 - 1.0) * SEMI_AMPIEZZA_CAMPO;
     p.z = 1.0e-7;
     p.ux = 0.0;
     p.uy = 0.0;
     p.uz = 1.0;
-    p.energia = spettro.sample(rng);
+    p.energia = spettro.campiona_energia(rng);
     return p;
 }
 
-// DISTANZA AL PROSSIMO CONFINE DI VOXEL
-inline double boundary_distance(double x, double y, double z, double ux, double uy, double uz, int ix, int iy, int iz) {
-    double distanza_minima_confine = 1.0e30; // inizializzata a infinito
-    if (std::fabs(ux) > 1.0e-12) {
-        double confine_voxel_X;
-        if (ux > 0){
-            confine_voxel_X = (ix + 1) * VOXEL_CM;
-        } else{
-            confine_voxel_X = ix * VOXEL_CM;
-        }
-        double distanza_lineare = (confine_voxel_X - x) / ux;
-        if (distanza_lineare > 1.0e-10){
-            distanza_minima_confine = std::min(distanza_minima_confine, distanza_lineare);
-        }
-    }
-    if (std::fabs(uy) > 1.0e-12) {
-        double confine_voxel_Y;
-        if (uy > 0){
-            confine_voxel_Y = (iy + 1) * VOXEL_CM;
-        } else{
-            confine_voxel_Y = iy * VOXEL_CM;
-        }
-        double distanza_lineare = (confine_voxel_Y - y) / uy;
-        if (distanza_lineare > 1.0e-10){
-            distanza_minima_confine = std::min(distanza_minima_confine, distanza_lineare);
-        }
-    }
-    if (std::fabs(uz) > 1.0e-12) {
-        double confine_voxel_Z;
-        if (uz > 0){
-            confine_voxel_Z = (iz + 1) * VOXEL_CM;
-        } else{
-            confine_voxel_Z = iz * VOXEL_CM;
-        }
-        double distanza_lineare = (confine_voxel_Z - z) / uz;
-        if (distanza_lineare > 1.0e-10) {
-            distanza_minima_confine = std::min(distanza_minima_confine, distanza_lineare);
-        }
-    }
-    return distanza_minima_confine;
-}
-
 // TRASPORTO FOTONE SEMPLIFICATO PER BEER LAMBERT
-void transport_photon(Particle p, const int *phantom, double *dose, Xoshiro256 &rng) {
-    while (p.energia > ECUT && inside(p.x, p.y, p.z)) {
+void trasporto_fotoni(Fotone p, const int *phantom, double *dose, Xoshiro256 &rng) {
+    while (p.energia > ECUT && verifica_confini(p.x, p.y, p.z)) {
         int mat = phantom[phantom_idx((int)(p.x/VOXEL_CM), (int)(p.y/VOXEL_CM), (int)(p.z/VOXEL_CM))];
-        double mu = get_mu_total(p.energia, mat);
+        double mu = calcolo_attenuazione_totale(p.energia, mat);
         double d = -std::log(rng()) / mu;
 
         p.x += p.ux * d;
         p.y += p.uy * d;
         p.z += p.uz * d;
 
-        if (inside(p.x, p.y, p.z)) {
+        if (verifica_confini(p.x, p.y, p.z)) {
             int ix = (int)(p.x / VOXEL_CM);
             int iy = (int)(p.y / VOXEL_CM);
             int iz = (int)(p.z / VOXEL_CM);
@@ -104,8 +59,8 @@ void transport_photon(Particle p, const int *phantom, double *dose, Xoshiro256 &
 int main(int argc, char *argv[]) {
 
     // valori default
-    long long num_fotoni = 1000000;   // default: 1M fotoni
-    int tipo_phantom = 0;         // 0=acqua, 1=eterogeneo
+    long long num_fotoni = 1000000;
+    int tipo_phantom = 0;
     uint64_t seed   = 42ULL;
 
     if (argc > 1) num_fotoni = std::atoll(argv[1]);
@@ -136,14 +91,14 @@ int main(int argc, char *argv[]) {
 
     if (tipo_phantom == 0){
         printf("Costruzione phantom con acqua \n");
-        build_phantom_water(phantom);
+        costruzione_phantom_acqua(phantom);
     }else {
         printf("Costruzione phantom eterogeneo \n");
-        build_phantom_hetero(phantom);
+        costruzione_phantom_acquaosso(phantom);
     }
 
-    Spectrum spettro;  // spettro 6MV con CDF
-    Xoshiro256 rng(seed); // PRNG xoshiro256**
+    Spettro spettro;
+    Xoshiro256 rng(seed);
 
     printf(" Avvio simulazione \n");
     auto tempo_inizio_esatto = std::chrono::high_resolution_clock::now();
@@ -159,18 +114,18 @@ int main(int argc, char *argv[]) {
             printf(" [%5.1f%%]  %.0f fotoni/s  Estimated Time of Arrival %.0fs\n", 100.0 * (i + 1) / num_fotoni, rate, tempo_necessrio_fotoni_rimanenti);
         }
 
-        Particle p = sample_source(spettro, rng);
-        transport_photon(p, phantom, dose, rng);
+        Fotone p = genera_fotone_iniziale(spettro, rng);
+        trasporto_fotoni(p, phantom, dose, rng);
     }
 
     auto tempo_fine_esatto = std::chrono::high_resolution_clock::now();
     double tempo_esecuzione = std::chrono::duration<double>(tempo_fine_esatto - tempo_inizio_esatto).count();
 
-    print_dose_stats(dose, num_fotoni, tempo_esecuzione);
+    stampa_statistiche_dose(dose, num_fotoni, tempo_esecuzione);
 
-    compute_pdd(dose, pdd, coordinate_cm);
-    compute_lateral_profile(dose, profilo_dose, coordinate_cm_laterali, 10.0);
-    print_pdd_table(coordinate_cm, pdd, phantom_label);
+    calcolo_pdd(dose, pdd, coordinate_cm);
+    calcolo_profilo_laterale(dose, profilo_dose, coordinate_cm_laterali, 10.0);
+    stampa_tabella_pdd(coordinate_cm, pdd, phantom_label);
 
     const char *pdd_file;
     const char *profilo_file;
@@ -188,10 +143,10 @@ int main(int argc, char *argv[]) {
       slice_file = "./CPU_Sequenziale/dose_slice_hetero_BL.csv";
       bin_file = "./CPU_Sequenziale/dose_hetero_BL.bin";
     }
-    save_pdd_csv(coordinate_cm, pdd, pdd_file);
-    save_profile_csv(coordinate_cm_laterali, profilo_dose, profilo_file);
-    save_dose_slice_csv(dose, slice_file);
-    save_dose_binary(dose, bin_file);
+    salva_pdd_csv(coordinate_cm, pdd, pdd_file);
+    salva_profilo_csv(coordinate_cm_laterali, profilo_dose, profilo_file);
+    salva_fetta_dose_csv(dose, slice_file);
+    salva_volume_completo(dose, bin_file);
 
     delete[] phantom;
     delete[] dose;
@@ -200,7 +155,15 @@ int main(int argc, char *argv[]) {
     delete[] profilo_dose;
     delete[] coordinate_cm_laterali;
 
+    char log_file[64];
+    snprintf(log_file, sizeof(log_file), "logs/CPU_SEQ_BL_%d.log", tipo_phantom);
+
+    FILE *f = fopen(log_file, "a");
+    fprintf(f, "TIMING version=CPU_SEQ_BL_%d n_fotoni=%lld t_sec=%.6f\n", tipo_phantom, num_fotoni, tempo_esecuzione);
+    fclose(f);
+
     printf("  Simulazione completata.\n");
+
 
     return 0;
 }

@@ -1,0 +1,6 @@
+TIMING version=GPU_V2_BL_0 n_fotoni=100000 t_h2d_ms=0.952 t_kernel_ms=0.231 t_d2h_ms=5.280 tempo_totale_secondi=0.006463
+TIMING version=GPU_V2_BL_0 n_fotoni=500000 t_h2d_ms=1.001 t_kernel_ms=0.814 t_d2h_ms=5.417 tempo_totale_secondi=0.007232
+TIMING version=GPU_V2_BL_0 n_fotoni=1000000 t_h2d_ms=0.925 t_kernel_ms=1.558 t_d2h_ms=5.346 tempo_totale_secondi=0.007829
+TIMING version=GPU_V2_BL_0 n_fotoni=5000000 t_h2d_ms=0.934 t_kernel_ms=7.529 t_d2h_ms=5.352 tempo_totale_secondi=0.013814
+TIMING version=GPU_V2_BL_0 n_fotoni=10000000 t_h2d_ms=0.935 t_kernel_ms=14.907 t_d2h_ms=5.450 tempo_totale_secondi=0.021292
+TIMING version=GPU_V2_BL_0 n_fotoni=50000000 t_h2d_ms=1.024 t_kernel_ms=74.684 t_d2h_ms=5.838 tempo_totale_secondi=0.081546

@@ -21,6 +21,8 @@
         }                                                                       \
     } while (0)
 
+
+
 struct Fotone {
     double x, y, z;
     double ux, uy, uz;
@@ -76,7 +78,7 @@ __device__ inline Fotone genera_fotone_iniziale(curandStatePhilox4_32_10_t *stat
 }
 
 __device__ inline double distanza_limite_voxel( double x, double y, double z, double ux, double uy, double uz, int ix, int iy, int iz) {
-double distanza_minima_confine = 1.0e30; // inizializzata a infinito
+    double distanza_minima_confine = 1.0e30; // inizializzata a infinito
     if (std::fabs(ux) > 1.0e-12) {
         double confine_voxel_X;
         if (ux > 0){
@@ -105,7 +107,8 @@ double distanza_minima_confine = 1.0e30; // inizializzata a infinito
         double confine_voxel_Z;
         if (uz > 0){
             confine_voxel_Z = (iz + 1) * VOXEL_CM;
-        } else{
+        }
+        else{
             confine_voxel_Z = iz * VOXEL_CM;
         }
         double distanza_lineare = (confine_voxel_Z - z) / uz;
@@ -235,19 +238,19 @@ __device__ void trasporto_fotoni( Fotone fotone_iniziale, const int *phantom, do
     }
 }
 
-__global__ void mc_kernel( long long num_fotoni, const int *phantom, double *dose, uint64_t seed_base) {
-    long long indice_thread = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (indice_thread >= num_fotoni)
-        return;
-
-    curandStatePhilox4_32_10_t stato_casuale;
-    curand_init(seed_base, (unsigned long long)indice_thread, 0, &stato_casuale);
-
-    Fotone p = genera_fotone_iniziale(&stato_casuale);
-    trasporto_fotoni(p, phantom, dose, &stato_casuale);
+__global__ void mc_kernel(long long num_fotoni, const int *phantom, double *dose, unsigned long long *contatori_fotoni_procesati, uint64_t seed_base){
+    while (true) {
+        unsigned long long id_fotone = atomicAdd(contatori_fotoni_procesati, 1ULL);
+        if ((long long)id_fotone >= num_fotoni)
+            break;
+        curandStatePhilox4_32_10_t stato_rng;
+        curand_init(seed_base, id_fotone, 0, &stato_rng);
+        Fotone p = genera_fotone_iniziale(&stato_rng);
+        trasporto_fotoni(p, phantom, dose, &stato_rng);
+    }
 }
 
-static void calcola_FLUENZA(double distribuzione_cumulata[NUMERO_BINS_SPETTRO]) {
+static void calcola_fluenza(double distribuzione_cumulata[NUMERO_BINS_SPETTRO]) {
     static const double FLUENZA[NUMERO_BINS_SPETTRO] = {
         0.0243, 0.0676, 0.0862, 0.0929, 0.0919, 0.0868, 0.0794, 0.0712,
         0.0628, 0.0548, 0.0471, 0.0399, 0.0334, 0.0276, 0.0224, 0.0178,
@@ -281,9 +284,8 @@ int main(int argc, char *argv[]) {
 
     cudaDeviceProp properties;
     CUDA_CHECK(cudaGetDeviceProperties(&properties, 0));
-    printf("  Monte Carlo per Radioterapia — GPU CUDA\n\n");
+    printf("  Monte Carlo per Radioterapia — GPU CUDA  V2\n\n");
     printf("  GPU        : %s  (SM %d.%d)\n", properties.name, properties.major, properties.minor);
-    printf("  Modalità   : Ciclo completo (Compton+PE+Pair)\n");
     printf("  Phantom    : %dx%dx%d voxel  |  voxel %.0fmm  |  %.0f³ cm³\n", NX, NY, NZ, VOXEL_CM * 10.0, PHANTOM_CM);
     printf("  Materiale  : %s\n", phantom_label);
     printf("  N fotoni   : %lld\n", num_fotoni);
@@ -291,6 +293,7 @@ int main(int argc, char *argv[]) {
     printf("  ECUT       : %.0f keV\n\n", ECUT * 1000.0);
 
     int *host_phantom = new int[NX * NY * NZ];
+
     if (tipo_phantom == 0) {
         printf("Costruzione phantom con acqua\n");
         costruzione_phantom_acqua(host_phantom);
@@ -299,22 +302,28 @@ int main(int argc, char *argv[]) {
         costruzione_phantom_acquaosso(host_phantom);
     }
 
-    int *device_panthom;
+    int *device_phantom;
     double *device_dose;
-    CUDA_CHECK(cudaMalloc(&device_panthom, NX * NY * NZ * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&device_dose,    NX * NY * NZ * sizeof(double)));
-    CUDA_CHECK(cudaMemset(device_dose, 0,  NX * NY * NZ * sizeof(double)));
+
+    unsigned long long *contatori_fotoni_procesati;
+
+    CUDA_CHECK(cudaMalloc(&device_phantom, NX * NY * NZ * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&device_dose, NX * NY * NZ * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&contatori_fotoni_procesati, sizeof(unsigned long long)));
+    CUDA_CHECK(cudaMemset(device_dose, 0, NX * NY * NZ * sizeof(double)));
+    CUDA_CHECK(cudaMemset(contatori_fotoni_procesati, 0, sizeof(unsigned long long)));
 
     double host_distribuizione_cumulata[NUMERO_BINS_SPETTRO];
-    calcola_FLUENZA(host_distribuizione_cumulata);
+    calcola_fluenza(host_distribuizione_cumulata);
     CUDA_CHECK(cudaMemcpyToSymbol(FLUENZA, host_distribuizione_cumulata, NUMERO_BINS_SPETTRO * sizeof(double)));
 
     double *host_dose = new double[NX * NY * NZ];
 
     const int DIMENSIONE_BLOCCO = 256;
-    long long numero_blocchi = (num_fotoni + DIMENSIONE_BLOCCO - 1) / DIMENSIONE_BLOCCO;
 
-    printf(" Avvio simulazione GPU\n");
+    const int NUMERO_BLOCCHI = 1024;
+
+    printf(" Avvio simulazione GPU V2\n");
 
     cudaEvent_t inizio_copia, fine_copia, inizio_kernel, fine_kernel, inizio_totale, fine_totale;
     cudaEventCreate(&inizio_copia); cudaEventCreate(&fine_copia);
@@ -322,18 +331,18 @@ int main(int argc, char *argv[]) {
     cudaEventCreate(&inizio_totale); cudaEventCreate(&fine_totale);
 
     cudaEventRecord(inizio_copia);
-    CUDA_CHECK(cudaMemcpy(device_panthom, host_phantom, NX * NY * NZ * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(device_phantom, host_phantom, NX * NY * NZ * sizeof(int), cudaMemcpyHostToDevice));
     cudaEventRecord(fine_copia);
     cudaEventSynchronize(fine_copia);
 
     cudaEventRecord(inizio_kernel);
-    mc_kernel<<<(int)numero_blocchi, DIMENSIONE_BLOCCO>>>(num_fotoni, device_panthom, device_dose, seed);
+    mc_kernel<<<NUMERO_BLOCCHI, DIMENSIONE_BLOCCO>>>( num_fotoni, device_phantom, device_dose, contatori_fotoni_procesati, seed);
     cudaEventRecord(fine_kernel);
     cudaEventSynchronize(fine_kernel);
     CUDA_CHECK(cudaGetLastError());
 
     cudaEventRecord(inizio_totale);
-    CUDA_CHECK(cudaMemcpy(host_dose, device_dose, NX * NY * NZ * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(host_dose, device_dose, NX * NY * NZ * sizeof(double),cudaMemcpyDeviceToHost));
     cudaEventRecord(fine_totale);
     cudaEventSynchronize(fine_totale);
 
@@ -343,7 +352,7 @@ int main(int argc, char *argv[]) {
     cudaEventElapsedTime(&ms_copia_da_gpu, inizio_totale, fine_totale);
 
     double tempo_calcolo_secondi = ms_calcolo_gpu / 1000.0;
-    double tempo_totale_secondi  = (ms_copia_a_gpu + ms_calcolo_gpu + ms_copia_da_gpu) / 1000.0;
+    double tempo_totale_secondi = (ms_copia_a_gpu + ms_calcolo_gpu + ms_copia_da_gpu) / 1000.0;
 
     cudaEventDestroy(inizio_copia); cudaEventDestroy(fine_copia);
     cudaEventDestroy(inizio_kernel); cudaEventDestroy(fine_kernel);
@@ -351,7 +360,7 @@ int main(int argc, char *argv[]) {
 
     stampa_statistiche_dose(host_dose, num_fotoni, tempo_calcolo_secondi);
 
-    double *pdd     = new double[NZ];
+    double *pdd = new double[NZ];
     double *coordinate_cm = new double[NZ];
     double *profilo_dose = new double[NX];
     double *coordinate_cm_laterali = new double[NX];
@@ -362,16 +371,16 @@ int main(int argc, char *argv[]) {
 
     char pdd_file[256], profilo_file[256], slice_file[256], bin_file[256];
 
-    if (tipo_phantom == 0) {
-        snprintf(pdd_file, sizeof(pdd_file), "./GPU_V1/pdd_water.csv");
-        snprintf(profilo_file, sizeof(profilo_file), "./GPU_V1/profile_water.csv");
-        snprintf(slice_file, sizeof(slice_file), "./GPU_V1/dose_slice_water.csv");
-        snprintf(bin_file, sizeof(bin_file), "./GPU_V1/dose_water.bin");
+        if (tipo_phantom == 0) {
+        snprintf(pdd_file, sizeof(pdd_file), "./GPU_V2/pdd_water.csv");
+        snprintf(profilo_file, sizeof(profilo_file), "./GPU_V2/profile_water.csv");
+        snprintf(slice_file, sizeof(slice_file), "./GPU_V2/dose_slice_water.csv");
+        snprintf(bin_file, sizeof(bin_file), "./GPU_V2/dose_water.bin");
     } else {
-        snprintf(pdd_file, sizeof(pdd_file), "./GPU_V1/pdd_hetero.csv");
-        snprintf(profilo_file, sizeof(profilo_file), "./GPU_V1/profile_hetero.csv");
-        snprintf(slice_file, sizeof(slice_file), "./GPU_V1/dose_slice_hetero.csv");
-        snprintf(bin_file, sizeof(bin_file), "./GPU_V1/dose_hetero.bin");
+        snprintf(pdd_file, sizeof(pdd_file), "./GPU_V2/pdd_hetero.csv");
+        snprintf(profilo_file, sizeof(profilo_file), "./GPU_V2/profile_hetero.csv");
+        snprintf(slice_file, sizeof(slice_file), "./GPU_V2/dose_slice_hetero.csv");
+        snprintf(bin_file, sizeof(bin_file), "./GPU_V2/dose_hetero.bin");
     }
 
     salva_pdd_csv(coordinate_cm, pdd, pdd_file);
@@ -379,8 +388,9 @@ int main(int argc, char *argv[]) {
     salva_fetta_dose_csv(host_dose, slice_file);
     salva_volume_completo(host_dose, bin_file);
 
-    cudaFree(device_panthom);
+    cudaFree(device_phantom);
     cudaFree(device_dose);
+    cudaFree(contatori_fotoni_procesati);
     delete[] host_phantom;
     delete[] host_dose;
     delete[] pdd;
@@ -389,11 +399,10 @@ int main(int argc, char *argv[]) {
     delete[] coordinate_cm_laterali;
 
     char log_file[64];
-    snprintf(log_file, sizeof(log_file), "logs/GPU_V1_%d.log", tipo_phantom);
-
+    snprintf(log_file, sizeof(log_file), "logs/GPU_V2_%d.log", tipo_phantom);
     FILE *f = fopen(log_file, "a");
     if (f) {
-        fprintf(f, "TIMING version=GPU_V1_%d n_fotoni=%lld "
+        fprintf(f, "TIMING version=GPU_V2_%d n_fotoni=%lld "
                    "t_h2d_ms=%.3f t_kernel_ms=%.3f t_d2h_ms=%.3f "
                    "tempo_totale_secondi=%.6f\n",
                 tipo_phantom, num_fotoni,
