@@ -1,109 +1,179 @@
-# Monte Carlo per Radioterapia in CUDA
-Simulatore Monte Carlo per il calcolo della dose in radioterapia, implementato su architetture CPU e GPU (CUDA), sviluppato nell'ambito del corso di **High Performance Computing**.
+# Monte Carlo Radiation Dose Simulation with CUDA
 
+A Monte Carlo photon transport simulator for radiotherapy dose calculation, implemented in C++ and CUDA and developed as part of the High Performance Computing course at the University of Calabria.
 
-## Panoramica
+The project explores CPU and GPU implementations of a radiation transport simulation, with a focus on parallelization strategies, GPU memory optimization, numerical precision, and physical validation.
 
-Questo progetto implementa un simulatore Monte Carlo per la **distribuzione della dose in radioterapia oncologica**, con simulazione del trasporto di fotoni in phantom voxelizzati omogenei ed eterogenei. Il sistema riproduce la fisica del fascio clinico da **6 MV** generato da un acceleratore lineare LINAC (Varian 2100C), conforme ai dati spettrali di Sheikh-Bagheri & Rogers.
+## Overview
 
-Il metodo Monte Carlo è lo standard di riferimento in dosimetria computazionale grazie alla sua capacità di modellare stocasticamente le singole interazioni fotone–materia all'interno di griglie voxelizzate derivate da immagini TAC. Per raggiungere una precisione clinicamente accettabile (incertezza ≤ 5%) sono necessari ordini di grandezza di 10⁷–10⁸ fotoni simulati, il che rende indispensabile l'accelerazione HPC.
+This project implements a Monte Carlo simulator for radiation dose deposition in homogeneous and heterogeneous voxelized phantoms. The simulated radiation beam is based on a 6 MV Varian 2100C linear accelerator model, using the photon energy spectrum reported by Sheikh-Bagheri and Rogers (2002).
 
-L'obiettivo principale è lo sviluppo e il confronto comparativo di cinque implementazioni su architetture differenti:
+The simulator models photon transport through matter, tracking stochastic interactions and energy deposition within a three-dimensional voxel grid.
 
-| Versione | Tecnologia | Parallelismo | Ottimizzazioni principali |
-|---|---|---|---|
-| CPU Sequenziale | C++ | Nessuno | Baseline fisica validata |
-| CPU Parallela | C++ + OpenMP | Multi-thread, Round Robin | Distribuzione del carico tra core |
-| GPU V1 | CUDA C | 1 thread per fotone | Constant memory per sezioni d'urto, cuRAND Philox |
-| GPU V2 | CUDA C | Persistent thread pool | Work stealing con coda atomica |
-| GPU V3 | CUDA C | Persistent thread pool | Conversione FP32 selettiva, texture memory |
+The main objective is to develop and compare five implementations, from a sequential CPU baseline to progressively optimized CUDA versions.
 
----
+### Key results
 
-### Interazioni fotone–materia
+- **Five implementations:** sequential CPU, parallel CPU, and three CUDA versions.
+- **GPU optimization:** selective FP32 arithmetic and 3D texture memory in GPU V3.
+- **Cache performance:** L1 cache hit rate increased from 29–34% to 91% in the optimized GPU implementation.
+- **Numerical consistency:** fewer than 0.0004% of voxels with non-zero dose showed a difference between GPU V3 and the previous implementations.
+- **Physical validation:** a suite of 10 tests covering photon interactions, dose distributions, energy conservation, and statistical convergence.
 
-La simulazione implementa i tre processi fondamentali nell'intervallo energetico della radioterapia (0.01–20 MeV), con sezioni d'urto derivate dal database **NIST XCOM**:
+## Implementations
 
-- **Effetto fotoelettrico** — assorbimento totale del fotone; l'energia viene depositata localmente nel voxel corrente
-- **Diffusione Compton** — campionamento angolare tramite il **metodo di Kahn** (rejection sampling sulla distribuzione di Klein–Nishina); il fotone continua con nuova direzione ed energia ridotta; l'energia ceduta è depositata localmente
-- **Produzione di coppie** — generazione di due fotoni di annichilazione da 0.511 MeV; l'energia cinetica residua viene depositata localmente
+| Version | Technology | Main approach |
+|---|---|---|
+| Sequential CPU | C++ | Reference implementation and physical baseline |
+| Parallel CPU | C++ / OpenMP | Multithreaded photon transport with round-robin scheduling |
+| GPU V1 | CUDA C | One CUDA thread per photon |
+| GPU V2 | CUDA C | Persistent thread pool and atomic work queue |
+| GPU V3 | CUDA C | Selective FP32 arithmetic and texture memory |
 
-### Trasporto e campionamento
+## Physical model
 
-Il cammino libero medio è campionato tramite inversione della **legge di Beer–Lambert**:
+### Photon interactions
 
-```
-λ = -ln(ξ) / μ
-```
+The simulator models three fundamental photon interaction processes in the energy range relevant to radiotherapy, using cross-section data from the NIST XCOM database.
 
-Il percorso attraverso la griglia è gestito tramite l'algoritmo di **voxel traversal** (Amanatides & Woo, 1987), che applica la legge esponenziale localmente all'interno di ciascun voxel dove il materiale è considerato uniforme.
+- **Photoelectric absorption:** the photon is absorbed and its energy is deposited locally.
+- **Compton scattering:** the scattering angle is sampled using the Kahn rejection-sampling method based on the Klein–Nishina distribution. The photon continues with reduced energy and a new direction.
+- **Pair production:** the photon generates an electron–positron pair. The positron annihilates, producing two 0.511 MeV photons.
 
-### Approssimazione KERMA locale
+### Photon transport
 
-L'energia trasferita dagli elettroni secondari viene depositata nel voxel di interazione (**dose ≈ KERMA**), senza simulare il trasporto esplicito delle particelle cariche. Questa approssimazione è fisicamente giustificata per fasci di megavoltaggio in acqua con voxel da 3 mm, in quanto il range degli elettroni Compton è dell'ordine del centimetro.
+The distance to the next interaction is sampled by inversion of the exponential attenuation distribution:
 
-### Spettro energetico
+$$
+s = -\frac{\ln(\xi)}{\mu}
+$$
+where $\xi$ is a uniformly distributed random variable and $\mu$ is the linear attenuation coefficient.
 
-Viene simulato un fascio policromatico con 24 bin da 0.25 MeV a 6.00 MeV, con fluenza relativa da Sheikh-Bagheri & Rogers (2002). L'energia media dello spettro è ~1.96 MeV.
+Photon transport through the voxel grid is handled using the Amanatides–Woo voxel traversal algorithm (1987). The exponential interaction distance is evaluated locally within each voxel, assuming uniform material properties.
 
----
+### Local KERMA approximation
 
-## Architettura del progetto
+The energy transferred to secondary electrons is deposited locally in the interaction voxel, using the approximation:
 
-#### Versione CPU Sequenziale
+$$
+D \approx K
+$$
+where $D$ is absorbed dose and $K$ is KERMA.
 
-Scritta in C++, funge da baseline fisica e da riferimento di validazione per tutte le versioni successive.
+Secondary charged-particle transport is not explicitly simulated. This approximation is used for megavoltage photon beams in water with 3 mm voxels. Its validity depends on the local charged-particle equilibrium conditions and is therefore treated as a modeling assumption rather than a general clinical accuracy guarantee.
 
-#### Versione CPU Parallela (OpenMP)
+### Radiation spectrum
 
-Parallelizzazione del loop principale tramite **OpenMP con distribuzione Round Robin** dei fotoni tra i thread disponibili. La versione rimane limitata dal numero di core fisici della macchina host.
+The simulated beam is polychromatic, with 24 energy bins ranging from 0.25 MeV to 6.00 MeV.
 
-#### Versioni GPU (CUDA)
+The relative fluence distribution is based on Sheikh-Bagheri and Rogers (2002), with a mean photon energy of approximately 1.96 MeV.
 
-**GPU V1 — Versione base**
-- Un thread CUDA per fotone simulato
-- Phantom in memoria globale con accesso coalescente lungo l'asse z
-- Costanti fisiche e sezioni d'urto in **constant memory** (cache broadcast)
-- Generatore **cuRAND Philox 4×32** con stato indipendente per thread
-- Accumulo della dose con `atomicAdd` su `double`
-- Criticità: sbilanciamento del carico (durata stocastica variabile), costo di inizializzazione cuRAND
+## HPC architecture and GPU optimization
 
-**GPU V2 — Work Stealing**
-- Pool fisso di `1024 × 256 = 262.144 thread` persistenti per tutta la durata del kernel
-- **Work queue atomica**: ogni thread acquisisce il prossimo fotone disponibile con `atomicAdd` su contatore globale; thread veloci non attendono ma riprendono immediatamente lavoro
-- Saturazione ottimale degli Streaming Multiprocessor della Tesla T4 (40 SM × 16 blocchi attivi)
-- Eliminazione del costo di creazione/distruzione dinamica dei thread
+### Sequential CPU baseline
 
-**GPU V3 — Precision + Texture Memory**
-- **Conversione selettiva FP32**: operazioni non critiche portate da double a float, sfruttando il throughput FP32 (8.1 TFLOPS vs 0.25 TFLOPS FP64 su Tesla T4)
-- Coordinate di posizione, energia del fotone e accumulo della dose mantengono doppia precisione
-- **Texture memory** per il phantom voxelizzato: ottimizza l'accesso 3D stocastico, portando la cache L1 hit dal 29–34% al 91%
-- Differenza fisica rispetto alle versioni precedenti: < 0.0004% dei voxel con dose > 0 (fisicamente accettabile)
+The sequential C++ implementation provides the reference physics model and baseline for the subsequent parallel implementations.
 
----
+It is used to compare the numerical consistency of the CPU and GPU versions.
 
-### Output
-Ciascuna versione produce:
-- File CSV con la curva **PDD** (Percent Depth Dose) lungo l'asse del fascio
-- File CSV con il **profilo laterale** della dose a 10 cm di profondità
-- File binario con la **griglia 3D** completa della dose
-- File di **log** con metriche di performance (throughput, tempo kernel, trasferimenti H↔D)
+### Parallel CPU — OpenMP
 
----
+The main photon transport loop is parallelized using OpenMP.
 
-## Validazione fisica
+Photons are distributed among the available CPU threads using a round-robin scheduling strategy. This implementation provides a multicore baseline for comparison with the GPU versions.
 
-Il simulatore è stato sottoposto a una suite di **10 test di validazione** fisica e clinica, eseguibili tramite il notebook Jupyter su tutte le versioni (cambiando solo le costanti dei file di output):
+### GPU V1 — Baseline CUDA implementation
 
-| Test | Verifica |
+The first GPU implementation uses a straightforward photon-parallel strategy:
+
+- One CUDA thread per simulated photon.
+- Global-memory phantom storage, with coalesced accesses along the z-axis.
+- Constant memory for physical constants and interaction cross sections.
+- cuRAND Philox 4×32 random number generation, with independent per-thread states.
+- Double-precision dose accumulation using `atomicAdd`.
+
+The main limitations are the variable execution time of individual photon histories and the cost of random number generator initialization.
+
+### GPU V2 — Persistent threads and work stealing
+
+GPU V2 introduces a persistent thread pool and an atomic work queue to improve load balancing.
+
+- A fixed pool of 262,144 persistent CUDA threads.
+- Each thread retrieves the next available photon using an atomic increment on a global counter.
+- Threads that finish their assigned photon immediately acquire additional work.
+- The implementation targets the NVIDIA Tesla T4 GPU, with 40 Streaming Multiprocessors.
+
+This approach reduces the impact of variable photon history lengths and avoids repeatedly creating and destroying threads during the simulation.
+
+### GPU V3 — Selective precision and texture memory
+
+GPU V3 combines numerical precision optimization with improved memory access.
+
+**Selective FP32 arithmetic**
+
+Non-critical operations are converted from double precision to single precision, taking advantage of the higher FP32 throughput of the Tesla T4.
+
+The following quantities retain double precision:
+
+- Photon position coordinates.
+- Photon energy.
+- Dose accumulation.
+
+The reported theoretical peak throughput of the Tesla T4 is approximately 8.1 TFLOPS for FP32 and 0.25 TFLOPS for FP64.
+
+**3D texture memory**
+
+The voxelized phantom is accessed through CUDA texture memory, which is designed to efficiently handle spatially localized access patterns.
+
+The optimization increases the reported L1 cache hit rate from 29–34% to 91%.
+
+The numerical comparison with the previous implementations shows a difference in fewer than 0.0004% of voxels with non-zero dose.
+
+## Validation and testing
+
+The simulator includes a suite of 10 physical and numerical validation tests, implemented in a Jupyter notebook and applicable to all five versions.
+
+| Test | Validation objective |
 |---|---|
-| Test 1 | Coefficiente di attenuazione lineare effettivo (regressione su PDD in zona 5–20 cm, range atteso: 0.030–0.055 cm⁻¹) |
-| Test 2 | Legge di Beer–Lambert pura (versione semplificata, tolleranza ±2% su 7 profondità di riferimento) |
-| Test 3 | Coerenza sezioni d'urto NIST: a 2 MeV in acqua, Compton > 99.9%, fotoelettrico < 0.01%, coppie = 0 |
-| Test 4 | Validazione stocastica dell'angolo di scattering Compton vs. coseno medio teorico di Klein–Nishina (5 energie, errore < 5%) |
-| Test 5 | Bilancio energetico globale: frazione depositata nel phantom tra 30% e 90% |
-| Test 6 | Forma del PDD clinico: picco in 0–2 cm, D(10cm)/D_max ∈ [0.60, 0.82], D(20cm)/D(10cm) ∈ [0.45, 0.72] |
-| Test 7 | Eterogeneità acqua–osso: incremento della dose nel voxel osseo e attenuazione a valle |
-| Test 8 | Penombra laterale e diffusione Compton |
-| Test 9 | **Gamma Index** vs. curve di riferimento DOSXYZnrc (Sheikh-Bagheri & Rogers) |
-| Test 10 | Convergenza statistica: riduzione dell'incertezza con √N fotoni |
+| 1 | Effective linear attenuation coefficient estimated from the PDD curve |
+| 2 | Beer–Lambert attenuation law in a simplified configuration, with a ±2% tolerance |
+| 3 | Consistency of NIST interaction cross sections at 2 MeV in water |
+| 4 | Compton scattering angle distribution compared with the theoretical Klein–Nishina mean |
+| 5 | Global energy balance and fraction of energy deposited within the phantom |
+| 6 | PDD curve shape and reference dose ratios at 10 cm and 20 cm depth |
+| 7 | Dose response in a water–bone heterogeneous phantom |
+| 8 | Lateral dose profile, penumbra, and Compton scattering |
+| 9 | Gamma Index comparison against DOSXYZnrc reference curves |
+| 10 | Statistical convergence and uncertainty reduction with increasing photon histories |
+
+These tests assess the consistency of the implemented physical model and the behavior of the numerical simulation. They do not constitute clinical commissioning or certification for treatment planning.
+
+## Output
+
+Each implementation produces:
+
+- CSV files containing the Percentage Depth Dose (PDD) curve along the beam axis.
+- CSV files containing the lateral dose profile at 10 cm depth.
+- A binary file containing the complete 3D dose grid.
+- Performance logs with throughput, kernel execution time, and host-to-device / device-to-host transfer metrics.
+
+## Repository structure
+
+| Directory / File | Description |
+|---|---|
+| `CPU_Sequenziale/` | Sequential C++ implementation |
+| `CPU_Parallelo/` | OpenMP implementation |
+| `GPU_V1/` | Baseline CUDA implementation |
+| `GPU_V2/` | Persistent threads and work queue |
+| `GPU_V3/` | Selective precision and texture memory |
+| `Moduli_CPU/` | Shared CPU modules |
+| `Moduli_GPU/` | Shared GPU modules |
+| `Risultati/` | Simulation results |
+| `logs/` | Performance logs |
+| `Implementazione progetto.ipynb` | Implementation and validation notebook |
+| `Relazione progetto.pdf` | Technical report |
+| `Presentazione progetto.pdf` | Project presentation |
+
+## Technologies
+
+`C++` `CUDA C` `OpenMP` `cuRAND` `NVIDIA Tesla T4` `Jupyter Notebook` `Monte Carlo Simulation` `High Performance Computing`
